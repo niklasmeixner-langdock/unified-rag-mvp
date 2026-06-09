@@ -1,0 +1,97 @@
+// Relational metadata for sources, OAuth tokens, document tracking, and sync history.
+// Vectors and chunk text live in Pinecone, keyed by Document.id.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ConnectorType {
+  SHAREPOINT
+  ONEDRIVE
+}
+
+enum SyncStatus {
+  IDLE
+  PENDING
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+// One configured source: a SharePoint/OneDrive drive (or folder tree) to index.
+model Source {
+  id            String        @id @default(uuid()) @db.Uuid
+  connectorType ConnectorType
+  label         String
+  // Provider-specific anchor: { siteId, driveId, folderId? } for SharePoint
+  externalRef   Json
+  // /drive/root/delta cursor for incremental sync
+  deltaCursor   String?
+  oauthTokenId  String?       @db.Uuid
+  oauthToken    OAuthToken?   @relation(fields: [oauthTokenId], references: [id])
+  syncStatus    SyncStatus    @default(IDLE)
+  syncMessage   String?
+  lastSyncedAt  DateTime?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  documents     Document[]
+  syncRuns      SyncRun[]
+
+  @@index([connectorType, syncStatus])
+}
+
+// One file fetched from a Source. The chunks/vectors are in Pinecone (id-linked via vectorIds).
+model Document {
+  id              String   @id @default(uuid()) @db.Uuid
+  sourceId        String   @db.Uuid
+  source          Source   @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  externalId      String
+  name            String
+  mimeType        String
+  sourceUrl       String?
+  contentHash     String?
+  contentVersion  String?
+  // Pinecone vector IDs for this document's chunks
+  vectorIds       String[]
+  extractedAt     DateTime?
+  embeddedAt      DateTime?
+  error           String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([sourceId, externalId])
+  @@index([sourceId, embeddedAt])
+}
+
+// OAuth credential storage. Tokens MUST be encrypted at rest in the app layer
+// before any non-local deployment (current MVP stores plaintext for dev only).
+model OAuthToken {
+  id            String   @id @default(uuid()) @db.Uuid
+  provider      String   // "microsoft"
+  accessToken   String   // encrypted at rest by app
+  refreshToken  String   // encrypted at rest by app
+  scope         String
+  expiresAt     DateTime
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  sources       Source[]
+}
+
+model SyncRun {
+  id          String     @id @default(uuid()) @db.Uuid
+  sourceId    String     @db.Uuid
+  source      Source     @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  status      SyncStatus
+  startedAt   DateTime   @default(now())
+  finishedAt  DateTime?
+  documentsScanned  Int  @default(0)
+  documentsChanged  Int  @default(0)
+  error       String?
+
+  @@index([sourceId, startedAt])
+}
