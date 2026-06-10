@@ -62,8 +62,16 @@ Content-Type: application/json
 
 ## MCP integration (Langdock etc.)
 
-The service exposes an MCP server at `POST /mcp` (Streamable HTTP, stateless) with a
-`search_documents` tool wrapping the same retrieval path as `/query`.
+The service exposes an MCP server at `POST /mcp` (Streamable HTTP, stateless). Apart from
+the one-time OAuth consent in a browser, everything is operable from an MCP client:
+
+| Tool | Purpose |
+|---|---|
+| `search_documents` | Semantic search over the indexed corpus (same path as `/query`) |
+| `list_sharepoint_libraries` | Browse sites/libraries of the connected account, find driveIds |
+| `index_sharepoint_library` | Register a library and start its first sync |
+| `list_sources` | Show indexed sources, sync status, document counts |
+| `sync_source` | Trigger an incremental re-sync |
 
 To connect from Langdock: **Integrations → MCP → add server**, enter
 `https://<host>/mcp` as the endpoint, choose API-key / custom-header auth, and send

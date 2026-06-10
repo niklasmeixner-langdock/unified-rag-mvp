@@ -24,6 +24,20 @@ export interface DeltaResponse {
   '@odata.deltaLink'?: string;
 }
 
+export interface SiteInfo {
+  id: string;
+  displayName?: string;
+  name?: string;
+  webUrl?: string;
+}
+
+export interface DriveInfo {
+  id: string;
+  name?: string;
+  driveType?: string;
+  webUrl?: string;
+}
+
 export class GraphClient {
   constructor(
     private readonly accessToken: string,
@@ -63,6 +77,21 @@ export class GraphClient {
   // Follow @odata.nextLink during a delta run (paging within one sync).
   async getDeltaPage(nextLink: string): Promise<DeltaResponse> {
     return this.request<DeltaResponse>(nextLink);
+  }
+
+  // Search SharePoint sites visible to the signed-in account. '*' returns all.
+  // See https://learn.microsoft.com/en-us/graph/api/site-search
+  async searchSites(query: string): Promise<SiteInfo[]> {
+    const res = await this.request<{ value: SiteInfo[] }>(
+      `${GRAPH_BASE}/sites?search=${encodeURIComponent(query)}`,
+    );
+    return res.value;
+  }
+
+  // List the document libraries (drives) of a site.
+  async listSiteDrives(siteId: string): Promise<DriveInfo[]> {
+    const res = await this.request<{ value: DriveInfo[] }>(`${GRAPH_BASE}/sites/${siteId}/drives`);
+    return res.value;
   }
 
   // Get a single driveItem by ID. Returned object includes @microsoft.graph.downloadUrl.

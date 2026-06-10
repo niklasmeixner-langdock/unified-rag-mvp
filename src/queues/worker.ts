@@ -17,7 +17,7 @@ import {
 import { SharePointConnector } from '../connectors/sharepoint/SharePointConnector.js';
 import type { Connector } from '../connectors/Connector.js';
 import { processDocument } from '../pipeline/runDocument.js';
-import { refreshAccessToken } from '../connectors/sharepoint/oauth.js';
+import { getFreshAccessToken } from '../connectors/sharepoint/tokens.js';
 import { deleteVectors } from '../pinecone/client.js';
 import { env } from '../env.js';
 import pino from 'pino';
@@ -25,47 +25,6 @@ import pino from 'pino';
 const log = pino({ name: 'worker' });
 
 const MAX_FILE_BYTES = env.MAX_FILE_SIZE_MB * 1024 * 1024;
-const TOKEN_EXPIRY_SLACK_MS = 5 * 60_000;
-
-// Microsoft refresh tokens are single-use: concurrent refreshes from multiple
-// worker processes invalidate each other and kill the source's credentials.
-// Serialize via a Redis lock and re-read the row inside it — losers of the
-// race pick up the winner's freshly stored token instead of refreshing again.
-async function getFreshAccessToken(tokenId: string): Promise<string> {
-  let token = await prisma.oAuthToken.findUniqueOrThrow({ where: { id: tokenId } });
-  if (token.expiresAt.getTime() - Date.now() > TOKEN_EXPIRY_SLACK_MS) return token.accessToken;
-
-  const lockKey = `oauth-refresh:${tokenId}`;
-  const deadline = Date.now() + 60_000;
-  while (true) {
-    const acquired = await redis.set(lockKey, '1', 'PX', 30_000, 'NX');
-    if (acquired) {
-      try {
-        token = await prisma.oAuthToken.findUniqueOrThrow({ where: { id: tokenId } });
-        if (token.expiresAt.getTime() - Date.now() > TOKEN_EXPIRY_SLACK_MS) {
-          return token.accessToken;
-        }
-        // TODO: encrypt tokens at rest before any non-local deployment.
-        const refreshed = await refreshAccessToken(token.refreshToken);
-        await prisma.oAuthToken.update({
-          where: { id: tokenId },
-          data: {
-            accessToken: refreshed.access_token,
-            refreshToken: refreshed.refresh_token ?? token.refreshToken,
-            expiresAt: new Date(Date.now() + refreshed.expires_in * 1000),
-          },
-        });
-        return refreshed.access_token;
-      } finally {
-        await redis.del(lockKey);
-      }
-    }
-    if (Date.now() > deadline) {
-      throw new Error(`Timed out waiting for OAuth refresh lock on token ${tokenId}`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-}
 
 async function getConnectorForSource(sourceId: string): Promise<Connector> {
   const source = await prisma.source.findUniqueOrThrow({ where: { id: sourceId } });
