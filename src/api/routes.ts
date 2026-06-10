@@ -7,6 +7,8 @@ import { syncSourceQueue } from '../queues/queues.js';
 import { embedTexts } from '../pipeline/embed.js';
 import { queryVectors } from '../pinecone/client.js';
 import { buildAuthorizeUrl, exchangeAuthorizationCode } from '../connectors/sharepoint/oauth.js';
+import { GraphClient } from '../connectors/sharepoint/graph.js';
+import { getFreshAccessToken, getLatestTokenId } from '../connectors/sharepoint/tokens.js';
 import { env } from '../env.js';
 import { requireApiKey } from './auth.js';
 
@@ -92,6 +94,21 @@ export async function registerRoutes(app: FastifyInstance) {
         include: { _count: { select: { documents: true } } },
       });
       return source;
+    });
+
+    // Which Microsoft account the service is acting as (most recent OAuth grant).
+    instance.get('/oauth/whoami', async () => {
+      const tokenId = await getLatestTokenId();
+      const token = await prisma.oAuthToken.findUniqueOrThrow({ where: { id: tokenId } });
+      const graph = new GraphClient(await getFreshAccessToken(tokenId));
+      const me = await graph.getMe();
+      return {
+        displayName: me.displayName,
+        userPrincipalName: me.userPrincipalName,
+        mail: me.mail,
+        scope: token.scope,
+        grantedAt: token.createdAt,
+      };
     });
 
     // --- MCP endpoint (Streamable HTTP, stateless) ---

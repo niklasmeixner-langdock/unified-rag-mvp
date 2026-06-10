@@ -94,6 +94,11 @@ export class GraphClient {
     return res.value;
   }
 
+  // The signed-in user behind the current token.
+  async getMe(): Promise<{ displayName?: string; userPrincipalName?: string; mail?: string }> {
+    return this.request(`${GRAPH_BASE}/me`);
+  }
+
   // The tenant's root SharePoint site. Works on tenants where /sites?search=* fails.
   async getRootSite(): Promise<SiteInfo> {
     return this.request<SiteInfo>(`${GRAPH_BASE}/sites/root`);
