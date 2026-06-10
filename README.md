@@ -60,6 +60,16 @@ Content-Type: application/json
 → { "chunks": [{ "text": "...", "sourceName": "...", "sourceUrl": "...", "score": 0.87 }] }
 ```
 
+## MCP integration (Langdock etc.)
+
+The service exposes an MCP server at `POST /mcp` (Streamable HTTP, stateless) with a
+`search_documents` tool wrapping the same retrieval path as `/query`.
+
+To connect from Langdock: **Integrations → MCP → add server**, enter
+`https://<host>/mcp` as the endpoint, choose API-key / custom-header auth, and send
+`Authorization: Bearer <API_KEY>`. "Test connection" should list the
+`search_documents` tool.
+
 ## Configuration
 
 See `.env.example`. Required: Microsoft Entra app (client ID + secret + tenant ID), OpenAI API key, Pinecone API key + index, Postgres URL, Redis URL.
