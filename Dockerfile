@@ -1,6 +1,8 @@
 FROM node:20-alpine AS builder
 WORKDIR /app
 
+# openssl: required by Prisma's query engine on Alpine (avoids libssl detection failure)
+RUN apk add --no-cache openssl
 RUN corepack enable && corepack prepare pnpm@10 --activate
 
 COPY package.json pnpm-lock.yaml* ./
@@ -16,6 +18,8 @@ FROM node:20-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 
+# openssl: required by Prisma's query engine on Alpine (avoids libssl detection failure)
+RUN apk add --no-cache openssl
 RUN corepack enable && corepack prepare pnpm@10 --activate
 
 COPY package.json pnpm-lock.yaml* ./
