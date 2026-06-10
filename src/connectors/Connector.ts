@@ -11,6 +11,9 @@ export interface DocumentRef {
   mimeType: string;
   // Optional provider hash/etag — used to skip re-extraction when unchanged.
   contentVersion?: string;
+  // Size in bytes when the provider reports it — used to skip oversized files
+  // before downloading them.
+  sizeBytes?: number;
   // Optional user-facing URL for source attribution in retrieval results.
   sourceUrl?: string;
   // Provider raw metadata, opaque to the pipeline.

@@ -73,6 +73,7 @@ function toDocumentRef(item: DriveItem, driveId: string): DocumentRef {
     externalId: item.id,
     name: item.name,
     mimeType: item.file?.mimeType ?? 'application/octet-stream',
+    sizeBytes: item.size,
     contentVersion: item.eTag,
     sourceUrl: item.webUrl,
     raw: { driveId, parentPath: item.parentReference?.path },

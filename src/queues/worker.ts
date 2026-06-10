@@ -6,44 +6,75 @@ import {
   type SyncSourceJobData,
   type ProcessDocumentJobData,
   processDocumentQueue,
+  docJobId,
 } from './queues.js';
 import { prisma } from '../db/client.js';
-import { GraphClient } from '../connectors/sharepoint/graph.js';
+import {
+  GraphClient,
+  RateLimitError as GraphRateLimitError,
+  FileTooLargeError,
+} from '../connectors/sharepoint/graph.js';
 import { SharePointConnector } from '../connectors/sharepoint/SharePointConnector.js';
 import type { Connector } from '../connectors/Connector.js';
 import { processDocument } from '../pipeline/runDocument.js';
 import { refreshAccessToken } from '../connectors/sharepoint/oauth.js';
 import { deleteVectors } from '../pinecone/client.js';
+import { env } from '../env.js';
 import pino from 'pino';
 
 const log = pino({ name: 'worker' });
 
+const MAX_FILE_BYTES = env.MAX_FILE_SIZE_MB * 1024 * 1024;
+const TOKEN_EXPIRY_SLACK_MS = 5 * 60_000;
+
+// Microsoft refresh tokens are single-use: concurrent refreshes from multiple
+// worker processes invalidate each other and kill the source's credentials.
+// Serialize via a Redis lock and re-read the row inside it — losers of the
+// race pick up the winner's freshly stored token instead of refreshing again.
+async function getFreshAccessToken(tokenId: string): Promise<string> {
+  let token = await prisma.oAuthToken.findUniqueOrThrow({ where: { id: tokenId } });
+  if (token.expiresAt.getTime() - Date.now() > TOKEN_EXPIRY_SLACK_MS) return token.accessToken;
+
+  const lockKey = `oauth-refresh:${tokenId}`;
+  const deadline = Date.now() + 60_000;
+  while (true) {
+    const acquired = await redis.set(lockKey, '1', 'PX', 30_000, 'NX');
+    if (acquired) {
+      try {
+        token = await prisma.oAuthToken.findUniqueOrThrow({ where: { id: tokenId } });
+        if (token.expiresAt.getTime() - Date.now() > TOKEN_EXPIRY_SLACK_MS) {
+          return token.accessToken;
+        }
+        // TODO: encrypt tokens at rest before any non-local deployment.
+        const refreshed = await refreshAccessToken(token.refreshToken);
+        await prisma.oAuthToken.update({
+          where: { id: tokenId },
+          data: {
+            accessToken: refreshed.access_token,
+            refreshToken: refreshed.refresh_token ?? token.refreshToken,
+            expiresAt: new Date(Date.now() + refreshed.expires_in * 1000),
+          },
+        });
+        return refreshed.access_token;
+      } finally {
+        await redis.del(lockKey);
+      }
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`Timed out waiting for OAuth refresh lock on token ${tokenId}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
+
 async function getConnectorForSource(sourceId: string): Promise<Connector> {
-  const source = await prisma.source.findUniqueOrThrow({
-    where: { id: sourceId },
-    include: { oauthToken: true },
-  });
-  if (!source.oauthToken) {
+  const source = await prisma.source.findUniqueOrThrow({ where: { id: sourceId } });
+  if (!source.oauthTokenId) {
     throw new Error(`Source ${sourceId} has no oauthToken`);
   }
 
-  // Refresh if within 5 minutes of expiry.
-  // TODO: encrypt tokens at rest before any non-local deployment.
-  let accessToken = source.oauthToken.accessToken;
-  if (source.oauthToken.expiresAt.getTime() - Date.now() < 5 * 60_000) {
-    const refreshed = await refreshAccessToken(source.oauthToken.refreshToken);
-    accessToken = refreshed.access_token;
-    await prisma.oAuthToken.update({
-      where: { id: source.oauthToken.id },
-      data: {
-        accessToken: refreshed.access_token,
-        refreshToken: refreshed.refresh_token ?? source.oauthToken.refreshToken,
-        expiresAt: new Date(Date.now() + refreshed.expires_in * 1000),
-      },
-    });
-  }
-
-  const graph = new GraphClient(accessToken);
+  const accessToken = await getFreshAccessToken(source.oauthTokenId);
+  const graph = new GraphClient(accessToken, { maxDownloadBytes: MAX_FILE_BYTES });
   const externalRef = source.externalRef as { driveId: string };
   return new SharePointConnector(
     source.connectorType === 'SHAREPOINT' ? 'sharepoint' : 'onedrive',
@@ -52,7 +83,7 @@ async function getConnectorForSource(sourceId: string): Promise<Connector> {
   );
 }
 
-new Worker<SyncSourceJobData>(
+const syncWorker = new Worker<SyncSourceJobData>(
   'sync-source',
   async (job) => {
     const { sourceId } = job.data;
@@ -69,6 +100,7 @@ new Worker<SyncSourceJobData>(
 
     let scanned = 0;
     let changed = 0;
+    let skipped = 0;
 
     try {
       const connector = await getConnectorForSource(sourceId);
@@ -76,33 +108,62 @@ new Worker<SyncSourceJobData>(
 
       for await (const page of connector.syncDelta(source.deltaCursor ?? undefined)) {
         // Tombstone deleted documents: remove their vectors from Pinecone + DB.
-        for (const externalId of page.deleted) {
-          const doc = await prisma.document.findUnique({
-            where: { sourceId_externalId: { sourceId, externalId } },
+        if (page.deleted.length > 0) {
+          const tombstoned = await prisma.document.findMany({
+            where: { sourceId, externalId: { in: page.deleted } },
+            select: { id: true, vectorIds: true },
           });
-          if (doc) {
-            await deleteVectors(doc.vectorIds);
-            await prisma.document.delete({ where: { id: doc.id } });
+          if (tombstoned.length > 0) {
+            await deleteVectors(tombstoned.flatMap((d) => d.vectorIds));
+            await prisma.document.deleteMany({
+              where: { id: { in: tombstoned.map((d) => d.id) } },
+            });
           }
         }
 
+        // One round-trip per page instead of one findUnique per document —
+        // at millions of documents the per-row variant dominates sync time.
+        const existing = page.documents.length
+          ? await prisma.document.findMany({
+              where: { sourceId, externalId: { in: page.documents.map((d) => d.externalId) } },
+              select: { externalId: true, contentVersion: true },
+            })
+          : [];
+        const knownVersions = new Map(existing.map((d) => [d.externalId, d.contentVersion]));
+
+        const jobs = [];
         for (const ref of page.documents) {
           scanned += 1;
-          const existing = await prisma.document.findUnique({
-            where: { sourceId_externalId: { sourceId, externalId: ref.externalId } },
-          });
-          if (existing && existing.contentVersion === ref.contentVersion) continue;
+          if (ref.sizeBytes !== undefined && ref.sizeBytes > MAX_FILE_BYTES) {
+            skipped += 1;
+            log.warn(
+              { sourceId, externalId: ref.externalId, name: ref.name, sizeBytes: ref.sizeBytes },
+              'sync-source: skipping oversized file',
+            );
+            continue;
+          }
+          if (
+            knownVersions.has(ref.externalId) &&
+            knownVersions.get(ref.externalId) === (ref.contentVersion ?? null)
+          ) {
+            continue;
+          }
           changed += 1;
-          await processDocumentQueue.add('process', {
-            sourceId,
-            externalId: ref.externalId,
-            name: ref.name,
-            mimeType: ref.mimeType,
-            contentVersion: ref.contentVersion,
-            sourceUrl: ref.sourceUrl,
-            driveId,
+          jobs.push({
+            name: 'process',
+            data: {
+              sourceId,
+              externalId: ref.externalId,
+              name: ref.name,
+              mimeType: ref.mimeType,
+              contentVersion: ref.contentVersion,
+              sourceUrl: ref.sourceUrl,
+              driveId,
+            },
+            opts: { jobId: docJobId(sourceId, ref.externalId, ref.contentVersion) },
           });
         }
+        if (jobs.length > 0) await processDocumentQueue.addBulk(jobs);
 
         // Checkpoint cursor per page so we can resume on crash.
         await prisma.source.update({
@@ -124,8 +185,26 @@ new Worker<SyncSourceJobData>(
           documentsChanged: changed,
         },
       });
-      log.info({ sourceId, scanned, changed }, 'sync-source: done');
+      log.info({ sourceId, scanned, changed, skipped }, 'sync-source: done');
     } catch (err) {
+      // Graph throttled us. The cursor is checkpointed per page, so pause the
+      // queue for the advertised window and re-queue without burning an attempt.
+      if (err instanceof GraphRateLimitError) {
+        log.warn({ sourceId, retryAfterSeconds: err.retryAfterSeconds }, 'sync-source: throttled');
+        await prisma.syncRun.update({
+          where: { id: run.id },
+          data: {
+            status: 'FAILED',
+            finishedAt: new Date(),
+            error: 'Graph 429 — sync re-queued, will resume from cursor',
+            documentsScanned: scanned,
+            documentsChanged: changed,
+          },
+        });
+        await syncWorker.rateLimit(err.retryAfterSeconds * 1000);
+        throw Worker.RateLimitError();
+      }
+
       const message = err instanceof Error ? err.message : String(err);
       await prisma.source.update({
         where: { id: sourceId },
@@ -141,21 +220,51 @@ new Worker<SyncSourceJobData>(
   { connection: redis, concurrency: 2 },
 );
 
-new Worker<ProcessDocumentJobData>(
+const processWorker = new Worker<ProcessDocumentJobData>(
   'process-document',
   async (job) => {
     const { sourceId, externalId, name, mimeType, contentVersion, sourceUrl, driveId } = job.data;
     log.info({ sourceId, externalId, name }, 'process-document: start');
 
     const connector = await getConnectorForSource(sourceId);
-    const fetched = await connector.fetchDocument({
-      externalId,
-      name,
-      mimeType,
-      contentVersion,
-      sourceUrl,
-      raw: { driveId },
-    });
+
+    let fetched;
+    try {
+      fetched = await connector.fetchDocument({
+        externalId,
+        name,
+        mimeType,
+        contentVersion,
+        sourceUrl,
+        raw: { driveId },
+      });
+    } catch (err) {
+      if (err instanceof GraphRateLimitError) {
+        log.warn({ sourceId, externalId, retryAfterSeconds: err.retryAfterSeconds }, 'process-document: throttled');
+        await processWorker.rateLimit(err.retryAfterSeconds * 1000);
+        throw Worker.RateLimitError();
+      }
+      // Oversized files are a permanent skip, not a failure: record and complete.
+      if (err instanceof FileTooLargeError) {
+        await prisma.document.upsert({
+          where: { sourceId_externalId: { sourceId, externalId } },
+          create: {
+            sourceId,
+            externalId,
+            name,
+            mimeType,
+            sourceUrl,
+            contentVersion,
+            vectorIds: [],
+            error: err.message,
+          },
+          update: { name, mimeType, sourceUrl, contentVersion, error: err.message },
+        });
+        log.warn({ sourceId, externalId, name, sizeBytes: err.sizeBytes }, 'process-document: skipped oversized file');
+        return;
+      }
+      throw err;
+    }
 
     // Upsert document row first so we have a stable documentId for vector IDs.
     const doc = await prisma.document.upsert({

@@ -25,7 +25,10 @@ export interface DeltaResponse {
 }
 
 export class GraphClient {
-  constructor(private readonly accessToken: string) {}
+  constructor(
+    private readonly accessToken: string,
+    private readonly opts: { maxDownloadBytes?: number } = {},
+  ) {}
 
   private async request<T>(url: string): Promise<T> {
     const res = await fetch(url, {
@@ -72,6 +75,10 @@ export class GraphClient {
   // See https://learn.microsoft.com/en-us/graph/api/driveitem-get-content
   async downloadItem(driveId: string, itemId: string): Promise<Buffer> {
     const item = await this.getItem(driveId, itemId);
+    const max = this.opts.maxDownloadBytes;
+    if (max !== undefined && item.size !== undefined && item.size > max) {
+      throw new FileTooLargeError(itemId, item.size, max);
+    }
     const downloadUrl = item['@microsoft.graph.downloadUrl'];
     if (!downloadUrl) {
       throw new Error(`No downloadUrl on driveItem ${itemId} (likely a folder or unsupported type)`);
@@ -89,5 +96,12 @@ export class RateLimitError extends Error {
   constructor(message: string, public readonly retryAfterSeconds: number) {
     super(message);
     this.name = 'RateLimitError';
+  }
+}
+
+export class FileTooLargeError extends Error {
+  constructor(itemId: string, public readonly sizeBytes: number, public readonly maxBytes: number) {
+    super(`Item ${itemId} is ${sizeBytes} bytes — exceeds the ${maxBytes}-byte download cap`);
+    this.name = 'FileTooLargeError';
   }
 }
