@@ -24,5 +24,14 @@ const schema = z.object({
   MAX_FILE_SIZE_MB: z.coerce.number().positive().default(50),
 });
 
-export const env = schema.parse(process.env);
+const parsed = schema.safeParse(process.env);
+if (!parsed.success) {
+  console.error('[env] invalid environment variables:');
+  for (const issue of parsed.error.issues) {
+    console.error(`  ${issue.path.join('.')}: ${issue.message}`);
+  }
+  process.exit(1);
+}
+
+export const env = parsed.data;
 export type Env = z.infer<typeof schema>;

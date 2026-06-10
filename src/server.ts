@@ -1,14 +1,23 @@
-import Fastify from 'fastify';
-import sensible from '@fastify/sensible';
-import { env } from './env.js';
-import { registerRoutes } from './api/routes.js';
+// Bootstrap wrapper. In ESM, static imports run before any module code, so a
+// crash during import (env validation, client construction) would otherwise
+// kill the process before a single log line. The dynamic import here puts a
+// catch-all around the entire startup path.
 
-const app = Fastify({ logger: { level: 'info' } });
+/* eslint-disable no-console */
+console.log(`[boot] starting unified-rag-mvp API (node ${process.version}, PORT=${process.env.PORT ?? 'unset'})`);
 
-await app.register(sensible);
-await registerRoutes(app);
-
-app.listen({ port: env.PORT, host: '0.0.0.0' }).catch((err) => {
-  app.log.error(err);
+process.on('uncaughtException', (err) => {
+  console.error('[boot] uncaughtException:', err);
   process.exit(1);
 });
+process.on('unhandledRejection', (err) => {
+  console.error('[boot] unhandledRejection:', err);
+  process.exit(1);
+});
+
+try {
+  await import('./app.js');
+} catch (err) {
+  console.error('[boot] failed to start:', err);
+  process.exit(1);
+}
