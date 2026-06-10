@@ -60,14 +60,18 @@ export function buildMcpServer(): McpServer {
       if (!vector) return text('No matching documents found.');
       const hits = await queryVectors(vector, topK ?? 10);
       if (hits.length === 0) return text('No matching documents found.');
+      // Metadata first: the count up top keeps the LLM from hallucinating it.
       return {
-        content: hits.map((h) => ({
-          type: 'text' as const,
-          text:
-            `Source: ${h.metadata.name}` +
-            (h.metadata.sourceUrl ? ` (${h.metadata.sourceUrl})` : '') +
-            `, relevance ${h.score.toFixed(3)}\n${h.metadata.text}`,
-        })),
+        content: [
+          { type: 'text' as const, text: `${hits.length} matching chunks:` },
+          ...hits.map((h) => ({
+            type: 'text' as const,
+            text:
+              `Source: ${h.metadata.name}` +
+              (h.metadata.sourceUrl ? ` (${h.metadata.sourceUrl})` : '') +
+              `, relevance ${h.score.toFixed(3)}\n${h.metadata.text}`,
+          })),
+        ],
       };
     },
   );
@@ -94,12 +98,14 @@ export function buildMcpServer(): McpServer {
       if (sites.length === 0) return text('No SharePoint sites found for that search.');
 
       const lines: string[] = [];
+      const inaccessible: string[] = [];
       for (const site of sites.slice(0, 15)) {
         let drives;
         try {
           drives = await graph.listSiteDrives(site.id);
         } catch {
-          continue; // sites without accessible drives are skipped
+          inaccessible.push(site.displayName ?? site.name ?? site.id);
+          continue;
         }
         for (const drive of drives) {
           lines.push(
@@ -108,8 +114,16 @@ export function buildMcpServer(): McpServer {
         }
       }
       if (lines.length === 0) return text('No accessible document libraries found.');
-      if (sites.length > 15) lines.push(`(${sites.length - 15} more sites omitted; narrow with siteSearch)`);
-      return text(lines.join('\n'));
+
+      // Metadata and notices before the data so they survive truncation.
+      const header: string[] = [`${lines.length} document libraries:`];
+      if (sites.length > 15) {
+        header.push(`Notice: only the first 15 of ${sites.length} sites were checked; narrow with siteSearch.`);
+      }
+      if (inaccessible.length > 0) {
+        header.push(`Notice: ${inaccessible.length} sites could not be read (${inaccessible.join(', ')}).`);
+      }
+      return text([...header, ...lines].join('\n'));
     },
   );
 
@@ -177,16 +191,17 @@ export function buildMcpServer(): McpServer {
         return text('No sources registered yet. Use index_sharepoint_library to add one.');
       }
       return text(
-        sources
-          .map(
+        [
+          `${sources.length} sources:`,
+          ...sources.map(
             (s) =>
               `"${s.label}" (sourceId: ${s.id})\n` +
               `  status: ${s.syncStatus}` +
               (s.syncMessage ? ` (${s.syncMessage})` : '') +
               `, documents: ${s._count.documents}` +
               `, last synced: ${s.lastSyncedAt?.toISOString() ?? 'never'}`,
-          )
-          .join('\n'),
+          ),
+        ].join('\n'),
       );
     },
   );
