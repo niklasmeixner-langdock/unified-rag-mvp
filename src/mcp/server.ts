@@ -94,7 +94,29 @@ export function buildMcpServer(): McpServer {
     },
     async ({ siteSearch }) => {
       const graph = await graphClient();
-      const sites = await graph.searchSites(siteSearch ?? '*');
+      let sites;
+      let searchFellBack = false;
+      try {
+        sites = await graph.searchSites(siteSearch ?? '*');
+      } catch (err) {
+        // Some tenants 500 on wildcard site search. Fall back to the sites
+        // reachable directly: the root site and any followed sites.
+        const fallback = [];
+        try {
+          fallback.push(await graph.getRootSite());
+        } catch {
+          // root site unavailable too; rethrow original below if nothing found
+        }
+        try {
+          fallback.push(...(await graph.listFollowedSites()));
+        } catch {
+          // followed sites endpoint not available for this account type
+        }
+        if (fallback.length === 0) throw err;
+        const seen = new Set();
+        sites = fallback.filter((s) => (seen.has(s.id) ? false : (seen.add(s.id), true)));
+        searchFellBack = true;
+      }
       if (sites.length === 0) return text('No SharePoint sites found for that search.');
 
       const lines: string[] = [];
@@ -117,6 +139,11 @@ export function buildMcpServer(): McpServer {
 
       // Metadata and notices before the data so they survive truncation.
       const header: string[] = [`${lines.length} document libraries:`];
+      if (searchFellBack) {
+        header.push(
+          'Notice: site search is unavailable on this tenant; showing only the root site and followed sites. Other sites exist but cannot be enumerated.',
+        );
+      }
       if (sites.length > 15) {
         header.push(`Notice: only the first 15 of ${sites.length} sites were checked; narrow with siteSearch.`);
       }

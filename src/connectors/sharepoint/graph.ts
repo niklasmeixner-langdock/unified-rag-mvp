@@ -94,6 +94,17 @@ export class GraphClient {
     return res.value;
   }
 
+  // The tenant's root SharePoint site. Works on tenants where /sites?search=* fails.
+  async getRootSite(): Promise<SiteInfo> {
+    return this.request<SiteInfo>(`${GRAPH_BASE}/sites/root`);
+  }
+
+  // Sites the signed-in user follows.
+  async listFollowedSites(): Promise<SiteInfo[]> {
+    const res = await this.request<{ value: SiteInfo[] }>(`${GRAPH_BASE}/me/followedSites`);
+    return res.value;
+  }
+
   // Get a single driveItem by ID. Returned object includes @microsoft.graph.downloadUrl.
   async getItem(driveId: string, itemId: string): Promise<DriveItem> {
     return this.request<DriveItem>(`${GRAPH_BASE}/drives/${driveId}/items/${itemId}`);
