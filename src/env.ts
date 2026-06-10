@@ -21,6 +21,7 @@ const schema = z.object({
 
   SYNC_CRON: z.string().default('0 */2 * * *'),
   EMBEDDING_BATCH_SIZE: z.coerce.number().int().positive().default(128),
+  MAX_FILE_SIZE_MB: z.coerce.number().positive().default(50),
 });
 
 export const env = schema.parse(process.env);

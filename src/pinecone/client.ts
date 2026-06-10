@@ -26,8 +26,10 @@ export async function upsertVectors(records: VectorRecord[]): Promise<void> {
 }
 
 export async function deleteVectors(ids: string[]): Promise<void> {
-  if (ids.length === 0) return;
-  await index.deleteMany(ids);
+  // Pinecone caps deleteMany at 1000 IDs per request.
+  for (let i = 0; i < ids.length; i += 1000) {
+    await index.deleteMany(ids.slice(i, i + 1000));
+  }
 }
 
 export interface QueryHit {

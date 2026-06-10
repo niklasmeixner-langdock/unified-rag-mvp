@@ -1,5 +1,7 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
+import { buildMcpServer } from '../mcp/server.js';
 import { prisma } from '../db/client.js';
 import { syncSourceQueue } from '../queues/queues.js';
 import { embedTexts } from '../pipeline/embed.js';
@@ -91,6 +93,50 @@ export async function registerRoutes(app: FastifyInstance) {
       });
       return source;
     });
+
+    // --- MCP endpoint (Streamable HTTP, stateless) ---
+    // Remote MCP clients (e.g. Langdock integrations) connect here with
+    // `Authorization: Bearer <API_KEY>` and get the search_documents tool.
+
+    instance.post('/mcp', async (req, reply) => {
+      const server = buildMcpServer();
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: undefined, // stateless — no session tracking
+        enableJsonResponse: true,
+      });
+      reply.raw.on('close', () => {
+        void transport.close();
+        void server.close();
+      });
+      await server.connect(transport);
+      // The SDK writes to the raw response, so take it out of Fastify's hands.
+      reply.hijack();
+      try {
+        await transport.handleRequest(req.raw, reply.raw, req.body);
+      } catch (err) {
+        req.log.error({ err }, 'mcp request failed');
+        if (!reply.raw.headersSent) {
+          reply.raw.writeHead(500, { 'content-type': 'application/json' });
+          reply.raw.end(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              error: { code: -32603, message: 'Internal server error' },
+              id: null,
+            }),
+          );
+        }
+      }
+    });
+
+    // Stateless server: no SSE stream to resume (GET), no session to end (DELETE).
+    const mcpMethodNotAllowed = async (_req: FastifyRequest, reply: FastifyReply) =>
+      reply.code(405).send({
+        jsonrpc: '2.0',
+        error: { code: -32000, message: 'Method not allowed' },
+        id: null,
+      });
+    instance.get('/mcp', mcpMethodNotAllowed);
+    instance.delete('/mcp', mcpMethodNotAllowed);
 
     // Retrieval endpoint — accepts a text query, returns top-k matching chunks.
     instance.post('/query', async (req) => {
