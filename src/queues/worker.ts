@@ -1,5 +1,6 @@
 // BullMQ worker entry point. Run with `pnpm worker`.
 
+import { createServer } from 'node:http';
 import { Worker } from 'bullmq';
 import { redis } from './connection.js';
 import {
@@ -273,5 +274,19 @@ const processWorker = new Worker<ProcessDocumentJobData>(
     limiter: { max: 60, duration: 60_000 },
   },
 );
+
+// Minimal liveness endpoint so the worker can run behind the same Railway
+// healthcheck config as the API.
+createServer((req, res) => {
+  if (req.url === '/health') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end('{"ok":true}');
+  } else {
+    res.writeHead(404);
+    res.end();
+  }
+}).listen(env.PORT, '0.0.0.0', () => {
+  log.info(`[boot] worker health endpoint listening on :${env.PORT}`);
+});
 
 log.info('Workers started: sync-source, process-document');
