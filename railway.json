@@ -5,7 +5,8 @@
     "dockerfilePath": "Dockerfile"
   },
   "deploy": {
-    "startCommand": "echo '[start] shell alive' && pnpm prisma migrate deploy; echo \"[start] migrate exited with $?\"; node dist/server.js; echo \"[start] node exited with $?\"; sleep 300",
+    "preDeployCommand": "pnpm prisma migrate deploy",
+    "startCommand": "node dist/server.js",
     "healthcheckPath": "/health",
     "healthcheckTimeout": 30,
     "restartPolicyType": "ON_FAILURE",
